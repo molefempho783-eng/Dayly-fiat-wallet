@@ -21,9 +21,10 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as Linking from 'expo-linking';
 
 import { useTheme } from '../context/ThemeContext';
-import { auth } from '../../firebaseConfig';
+import { auth, db } from '../../firebaseConfig';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { getApp } from 'firebase/app';
+import { doc, onSnapshot } from 'firebase/firestore';
 import createStyles from '../context/appStyles';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
@@ -245,6 +246,31 @@ export default function WalletScreen() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Real-time balance listener - updates automatically when wallet changes
+  useEffect(() => {
+    if (!uid) return;
+
+    const walletRef = doc(db, 'wallets', uid);
+    const unsubscribe = onSnapshot(
+      walletRef,
+      (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          const newBalance = toNumberAmount(data.balance || 0);
+          const newCurrency = pickCurrency(data.currency, 'ZAR');
+          
+          setBalance(newBalance);
+          setBaseCurrency(newCurrency);
+        }
+      },
+      (error) => {
+        console.log('Wallet listener error:', error);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [uid]);
 
   function buildQrPayload(): string {
     // Keep it STABLE: just encode wallet identity (no amount, no timestamp)

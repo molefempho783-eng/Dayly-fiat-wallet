@@ -224,41 +224,49 @@ export const convertCurrency = onCall(
 // ---------- PayFast Helpers ----------
 import * as crypto from 'crypto';
 
-function generatePayFastSignature(data: Record<string, string>, passphrase: string): string {
-  // PayFast signature generation steps:
-  // 1. Remove signature field, empty strings, null, undefined
-  // 2. Sort keys alphabetically
-  // 3. URL-encode values (PayFast accepts both upper and lowercase encoding)
-  // 4. Build query string: key1=value1&key2=value2
-  // 5. Append passphrase if provided: &passphrase=encoded_passphrase
-  // 6. Generate MD5 hash (lowercase hex)
-  
+// PayFast: clean and encode helpers
+const cleanPf = (v: any) => (v == null ? '' : String(v).trim());
+const encodePf = (v: string) => encodeURIComponent(v).replace(/%20/g, '+');
+
+type PayFastSignatureOpts = { includeEmpty?: boolean; excludeKeys?: string[] };
+
+function buildPayFastQueryString(
+  data: Record<string, string>,
+  opts: PayFastSignatureOpts = {}
+): { queryString: string; sortedKeys: string[] } {
+  const includeEmpty = opts.includeEmpty === true;
+  const exclude = new Set<string>(opts.excludeKeys ?? ['signature']);
   const filtered: Record<string, string> = {};
+
   for (const [key, value] of Object.entries(data)) {
-    // Exclude signature field and empty/null/undefined values
-    if (key !== 'signature' && value !== '' && value !== null && value !== undefined) {
-      // Trim whitespace (PayFast requirement)
-      filtered[key] = String(value).trim();
-    }
+    if (exclude.has(key)) continue;
+    if (value === null || value === undefined) continue;
+    const cleaned = cleanPf(value);
+    if (!includeEmpty && cleaned === '') continue;
+    filtered[key] = cleaned;
   }
-  
-  // Sort keys alphabetically (PayFast requirement)
+
   const sortedKeys = Object.keys(filtered).sort();
-  
-  // Build query string with URL-encoded values
   const queryString = sortedKeys
-    .map(key => `${key}=${encodeURIComponent(filtered[key])}`)
+    .map((key) => `${key}=${encodePf(filtered[key])}`)
     .join('&');
-  
-  // Append passphrase if provided (also URL-encoded)
-  const fullString = passphrase && passphrase.trim()
-    ? `${queryString}&passphrase=${encodeURIComponent(passphrase.trim())}` 
-    : queryString;
-  
-  // Generate MD5 hash (must be lowercase hex)
-  const signature = crypto.createHash('md5').update(fullString).digest('hex');
-  
-  return signature;
+
+  return { queryString, sortedKeys };
+}
+
+function generatePayFastSignature(
+  data: Record<string, string>,
+  passphrase: string,
+  opts: PayFastSignatureOpts = {}
+): string {
+  // 1) clean + remove excluded keys
+  // 2) sort alphabetically
+  // 3) encode with %20→+ for spaces
+  // 4) append raw passphrase (not URL-encoded) if present
+  const { queryString } = buildPayFastQueryString(data, opts);
+  const pf = cleanPf(passphrase);
+  const fullString = pf ? `${queryString}&passphrase=${pf}` : queryString;
+  return crypto.createHash('md5').update(fullString).digest('hex');
 }
 
 // ---------- PayFast Types ----------
@@ -290,9 +298,9 @@ export const createPayFastPayment = onCall(
       throw new HttpsError('invalid-argument', 'amount must be a positive number');
     }
     
-    const merchantId = process.env.PAYFAST_MERCHANT_ID;
-    const merchantKey = process.env.PAYFAST_MERCHANT_KEY;
-    const passphrase = process.env.PAYFAST_PASSPHRASE || '';
+    const merchantId = cleanPf(process.env.PAYFAST_MERCHANT_ID);
+    const merchantKey = cleanPf(process.env.PAYFAST_MERCHANT_KEY);
+    const passphrase = cleanPf(process.env.PAYFAST_PASSPHRASE || '');
     
     if (!merchantId || !merchantKey) {
         logger.error('PayFast credentials missing', { hasMerchantId: !!merchantId, hasMerchantKey: !!merchantKey });
@@ -303,7 +311,7 @@ export const createPayFastPayment = onCall(
     const paymentId = db.collection('_ids').doc().id;
     
     // Get ITN URL (webhook endpoint)
-    const itnUrl = process.env.PAYFAST_ITN_URL || '';
+    const itnUrl = cleanPf(process.env.PAYFAST_ITN_URL || '');
     if (!itnUrl) {
       logger.warn('PayFast ITN URL not configured - webhooks will not work');
     }
@@ -339,27 +347,18 @@ export const createPayFastPayment = onCall(
     
     // Generate signature BEFORE adding signature field to paymentData
     // PayFast validates signature by: filtering empty values, sorting, encoding, adding passphrase, MD5
-    const signature = generatePayFastSignature(paymentData, passphrase);
+    const signingData = { ...paymentData };
+    const signature = generatePayFastSignature(signingData, passphrase, { includeEmpty: false });
     
-    // Add signature to payment data (this field is excluded from signature calculation)
+    // Add signature after signing
     paymentData.signature = signature;
     
     // Detailed debug logging for signature troubleshooting
     try {
-      // Recreate the signing process for logging
-      const filtered: Record<string, string> = {};
-      for (const [key, value] of Object.entries(paymentData)) {
-        if (key !== 'signature' && value !== '' && value !== null && value !== undefined) {
-          filtered[key] = String(value).trim();
-        }
-      }
-      const sortedKeys = Object.keys(filtered).sort();
-      const queryString = sortedKeys
-        .map(key => `${key}=${encodeURIComponent(filtered[key])}`)
-        .join('&');
-      const fullString = passphrase && passphrase.trim()
-        ? `${queryString}&passphrase=${encodeURIComponent(passphrase.trim())}` 
-        : queryString;
+      // Recreate the signing process for logging (exclude merchant_key/signature)
+      const { queryString, sortedKeys } = buildPayFastQueryString(signingData);
+      const pf = cleanPf(passphrase);
+      const fullString = pf ? `${queryString}&passphrase=${pf}` : queryString;
       
       logger.info('PayFast Signature Debug:', {
         merchant_id: paymentData.merchant_id,
@@ -371,6 +370,7 @@ export const createPayFastPayment = onCall(
         signature: signature,
         passphrase_length: passphrase?.length || 0,
         has_passphrase: !!passphrase,
+        signing_string: fullString,
       });
     } catch (e: any) {
       logger.error('PayFast Debug Error:', e);
@@ -425,27 +425,55 @@ export const verifyPayFastPayment = onCall(
     
     if (!paymentId) throw new HttpsError('invalid-argument', 'paymentId required');
     
-    const merchantId = process.env.PAYFAST_MERCHANT_ID;
-    const merchantKey = process.env.PAYFAST_MERCHANT_KEY;
-    const passphrase = process.env.PAYFAST_PASSPHRASE || '';
+    const merchantId = cleanPf(process.env.PAYFAST_MERCHANT_ID);
+    const merchantKey = cleanPf(process.env.PAYFAST_MERCHANT_KEY);
+    const passphrase = cleanPf(process.env.PAYFAST_PASSPHRASE || '');
     
     if (!merchantId || !merchantKey) {
       throw new HttpsError('failed-precondition', 'PayFast credentials not configured');
     }
     
-    // Query PayFast to verify payment
+    // First, get the pending payment to check status and get pf_payment_id if available
+    const pendingRef = db.collection('pending_payments').doc(paymentId);
+    const pendingSnap = await pendingRef.get();
+    
+    if (!pendingSnap.exists) {
+      throw new HttpsError('not-found', 'Payment not found');
+    }
+    
+    const pending = pendingSnap.data();
+    
+    // If already completed, return success immediately
+    if (pending?.status === 'COMPLETED') {
+      return {
+        status: 'SUCCESS',
+        credited: pending.amount || 0,
+        currency: pending.currency || getBaseCurrency(),
+        paymentMethod: pending.paymentMethod || 'UNKNOWN',
+      };
+    }
+    
+    // Try to get pf_payment_id from pending payment (set by ITN webhook)
+    let pfPaymentId = pending?.pfPaymentId || pending?.payfastData?.pf_payment_id;
+    
+    // If we don't have pf_payment_id yet, we can't query PayFast directly
+    // In this case, we'll just return PENDING and let the ITN webhook handle it
+    if (!pfPaymentId) {
+      logger.info('PayFast verify: No pf_payment_id yet, waiting for ITN', { paymentId });
+      return { status: 'PENDING', message: 'Payment processing, please wait a moment' };
+    }
+    
+    // Query PayFast to verify payment using pf_payment_id
     const queryData: Record<string, string> = {
       merchant_id: merchantId,
       merchant_key: merchantKey,
-      pf_payment_id: paymentId,
+      pf_payment_id: String(pfPaymentId),
     };
     
-    const signature = generatePayFastSignature(queryData, passphrase);
+    const signature = generatePayFastSignature(queryData, passphrase, { includeEmpty: true });
     queryData.signature = signature;
     
-    const queryString = Object.keys(queryData)
-      .map(key => `${key}=${encodeURIComponent(queryData[key])}`)
-      .join('&');
+    const { queryString } = buildPayFastQueryString(queryData);
     
     try {
       const baseUrl = getPayFastBaseUrl();
@@ -472,10 +500,7 @@ export const verifyPayFastPayment = onCall(
           const base = getBaseCurrency();
           
           // Credit wallet if not already credited (idempotency)
-          const pendingRef = db.collection('pending_payments').doc(paymentId);
-          const pendingSnap = await pendingRef.get();
-          
-          if (pendingSnap.exists && pendingSnap.get('status') !== 'COMPLETED') {
+          if (pendingSnap.get('status') !== 'COMPLETED') {
             const now = Timestamp.now();
             
             await db.runTransaction(async (t) => {
@@ -504,8 +529,9 @@ export const verifyPayFastPayment = onCall(
                 currency: base,
                 status: 'SUCCESS',
                 payfastData: {
-                  pf_payment_id: details.pf_payment_id,
-                  payment_status: details.payment_status,
+                  pf_payment_id: details.pf_payment_id || null,
+                  payment_status: details.payment_status || null,
+                  payment_method: details.payment_method || 'UNKNOWN',
                 },
                 createdAt: now,
               });
@@ -707,7 +733,6 @@ export const adminAdjustBalance = onCall({}, async (request) => {
 
 // ---------- 8) Express webhook ----------
 const app = express();
-app.use(bodyParser.json());
 app.use((req, res, next) => cors(req, res, next));
 
 // Express app for future webhooks/endpoints if needed
@@ -717,50 +742,126 @@ app.use((req, res, next) => cors(req, res, next));
 export const payfastITN = onRequest(
   { secrets: ['PAYFAST_MERCHANT_KEY', 'PAYFAST_PASSPHRASE'] },
   async (req, res) => {
+    logger.info('PayFast ITN: Request received', {
+      method: req.method,
+      headers: {
+        'content-type': req.headers['content-type'],
+        'user-agent': req.headers['user-agent'],
+      },
+      hasBody: !!req.body,
+      bodyType: typeof req.body,
+    });
+    
     if (req.method !== 'POST') {
+      logger.warn('PayFast ITN: Invalid method', { method: req.method });
       res.status(405).send('Method not allowed');
       return;
     }
     
+    // PayFast sends data as form-encoded
+    const data: Record<string, string> = {};
+    let rawBodyString = '';
+    
     try {
-      // PayFast sends data as form-encoded or query string
-      const data: Record<string, string> = {};
-      
-      // Parse form data
-      if (req.body && typeof req.body === 'object') {
+
+      // Try to get raw body for signature verification
+      if ((req as any).rawBody) {
+        rawBodyString = (req as any).rawBody.toString();
+      } else if (typeof req.body === 'string') {
+        rawBodyString = req.body;
+      } else if (Buffer.isBuffer(req.body)) {
+        rawBodyString = req.body.toString();
+      }
+
+      // Parse form-encoded data
+      if (rawBodyString) {
+        const parsed = new URLSearchParams(rawBodyString);
+        parsed.forEach((value, key) => {
+          data[key] = decodeURIComponent(value);
+        });
+      } else if (req.body && typeof req.body === 'object') {
+        // Fallback: if already parsed
         Object.assign(data, req.body);
+        // Reconstruct raw string for signature (approximate)
+        rawBodyString = Object.entries(data)
+          .filter(([k]) => k !== 'signature')
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+          .join('&');
       }
-      
-      // Also check query string
-      if (req.query) {
-        Object.assign(data, req.query);
-      }
-      
-      const merchantKey = process.env.PAYFAST_MERCHANT_KEY;
-      const passphrase = process.env.PAYFAST_PASSPHRASE || '';
+
+      const merchantKey = cleanPf(process.env.PAYFAST_MERCHANT_KEY);
+      const passphrase = cleanPf(process.env.PAYFAST_PASSPHRASE || '');
       
       if (!merchantKey) {
         logger.error('PayFast ITN: Merchant key not configured');
         res.status(500).send('Configuration error');
         return;
       }
-      
+
+      logger.info('PayFast ITN: received', {
+        keys: Object.keys(data),
+        payment_status: data.payment_status,
+        m_payment_id: data.m_payment_id,
+        pf_payment_id: data.pf_payment_id,
+        hasRawBody: !!rawBodyString,
+        amount_gross: data.amount_gross,
+        custom_str1: data.custom_str1,
+      });
+
       // Verify signature
       const receivedSignature = data.signature;
-      const dataForSignature = { ...data };
-      delete dataForSignature.signature;
-      
-      const calculatedSignature = generatePayFastSignature(dataForSignature, passphrase);
-      
+      if (!receivedSignature) {
+        logger.error('PayFast ITN: Missing signature');
+        res.status(400).send('Missing signature');
+        return;
+      }
+
+      // Reconstruct signing string from parsed data (PayFast signature rules)
+      let signingString = '';
+      if (rawBodyString) {
+        // Use raw body if available (most accurate)
+        signingString = rawBodyString
+          .replace(/(^|&)signature=[^&]*/i, '')
+          .replace(/^&/, '')
+          .replace(/&$/, '');
+      } else {
+        // Fallback: reconstruct from parsed data (sorted alphabetically, excluding signature)
+        const signingData: Record<string, string> = { ...data };
+        delete signingData.signature;
+        
+        const sortedKeys = Object.keys(signingData).sort();
+        signingString = sortedKeys
+          .map((key) => `${key}=${encodeURIComponent(signingData[key]).replace(/%20/g, '+')}`)
+          .join('&');
+      }
+
+      const finalString = passphrase
+        ? `${signingString}&passphrase=${passphrase}`
+        : signingString;
+
+      const calculatedSignature = crypto
+        .createHash('md5')
+        .update(finalString)
+        .digest('hex');
+
       if (receivedSignature !== calculatedSignature) {
         logger.error('PayFast ITN signature mismatch', {
-          received: receivedSignature?.substring(0, 10),
-          calculated: calculatedSignature?.substring(0, 10),
+          received: receivedSignature,
+          calculated: calculatedSignature,
+          signingString: finalString.substring(0, 200),
+          fullSigningString: finalString,
         });
         res.status(400).send('Invalid signature');
         return;
       }
-      
+
+      logger.info('PayFast ITN: Signature verified successfully', {
+        m_payment_id: data.m_payment_id,
+        pf_payment_id: data.pf_payment_id,
+      });
+
+
       // Verify payment status
       if (data.payment_status !== 'COMPLETE') {
         logger.info('PayFast ITN: Payment not complete', { 
@@ -776,8 +877,24 @@ export const payfastITN = onRequest(
       const amount = Number(data.amount_gross);
       const pfPaymentId = data.pf_payment_id;
       
+      logger.info('PayFast ITN: Extracted payment data', {
+        paymentId,
+        uid,
+        amount,
+        pfPaymentId,
+        amount_gross_raw: data.amount_gross,
+      });
+      
       if (!paymentId || !uid || !amount || isNaN(amount)) {
-        logger.error('PayFast ITN: Missing required fields', { paymentId, uid, amount });
+        logger.error('PayFast ITN: Missing required fields', { 
+          paymentId, 
+          uid, 
+          amount,
+          amount_gross_raw: data.amount_gross,
+          hasPaymentId: !!paymentId,
+          hasUid: !!uid,
+          isAmountValid: !isNaN(amount),
+        });
         res.status(400).send('Missing required fields');
         return;
       }
@@ -787,15 +904,28 @@ export const payfastITN = onRequest(
       const pendingSnap = await pendingRef.get();
       
       if (!pendingSnap.exists) {
-        logger.warn('PayFast ITN: Payment ID not found in pending payments', { paymentId });
+        logger.warn('PayFast ITN: Payment ID not found in pending payments', { 
+          paymentId,
+          collection: 'pending_payments',
+        });
         // Still return OK to prevent PayFast retries
         res.status(200).send('OK');
         return;
       }
       
       const pending = pendingSnap.data();
+      logger.info('PayFast ITN: Found pending payment', {
+        paymentId,
+        currentStatus: pending?.status,
+        pendingAmount: pending?.amount,
+        pendingUid: pending?.uid,
+      });
+      
       if (pending?.status === 'COMPLETED') {
-        logger.info('PayFast ITN: Payment already processed', { paymentId });
+        logger.info('PayFast ITN: Payment already processed', { 
+          paymentId,
+          completedAt: pending?.completedAt,
+        });
         res.status(200).send('OK');
         return;
       }
@@ -804,16 +934,34 @@ export const payfastITN = onRequest(
       const now = Timestamp.now();
       const base = getBaseCurrency();
       
-      await db.runTransaction(async (t) => {
+      logger.info('PayFast ITN: Starting transaction', { 
+        paymentId, 
+        uid, 
+        amount, 
+        base,
+        prevStatus: pending?.status,
+      });
+      
+      try {
+        await db.runTransaction(async (t) => {
         const wRef = walletDoc(uid);
         const wSnap = await t.get(wRef);
         const prevBalance = wSnap.exists ? Number(wSnap.get('balance') || 0) : 0;
+        const newBalance = prevBalance + amount;
+        
+        logger.info('PayFast ITN: Wallet balance update', {
+          uid,
+          prevBalance,
+          amount,
+          newBalance,
+          walletExists: wSnap.exists,
+        });
         
         t.set(
           wRef,
           {
             uid,
-            balance: prevBalance + amount,
+            balance: newBalance,
             currency: base,
             updatedAt: now,
             createdAt: wSnap.exists ? (wSnap.get('createdAt') || now) : now,
@@ -822,43 +970,86 @@ export const payfastITN = onRequest(
         );
         
         const txRef = txCollection(uid).doc(paymentId);
+        const paymentMethod = data.payment_method || 'UNKNOWN';
         t.set(txRef, {
           type: 'TOP_UP',
           provider: 'PAYFAST',
-          paymentMethod: data.payment_method || 'UNKNOWN', // Zapper, card, EFT, etc.
+          paymentMethod: paymentMethod,
           amount: amount,
           currency: base,
           status: 'SUCCESS',
           payfastData: {
-            pf_payment_id: pfPaymentId,
-            payment_status: data.payment_status,
-            payment_method: data.payment_method,
+            pf_payment_id: pfPaymentId || null,
+            payment_status: data.payment_status || null,
+            payment_method: paymentMethod,
           },
           createdAt: now,
+        });
+        
+        logger.info('PayFast ITN: Transaction record created', {
+          paymentId,
+          txPath: `wallets/${uid}/transactions/${paymentId}`,
         });
         
         // Mark pending payment as completed
         t.update(pendingRef, { 
           status: 'COMPLETED', 
           completedAt: now,
-          pfPaymentId,
-          paymentMethod: data.payment_method,
+          pfPaymentId: pfPaymentId || null,
+          paymentMethod: paymentMethod,
+        });
+        
+        logger.info('PayFast ITN: Pending payment marked as COMPLETED', {
+          paymentId,
         });
       });
+      
+      logger.info('PayFast ITN: Transaction completed successfully', {
+        paymentId,
+        uid,
+        amount,
+      });
+      } catch (txError: any) {
+        logger.error('PayFast ITN: Transaction failed', {
+          message: txError?.message,
+          code: txError?.code,
+          stack: txError?.stack,
+          paymentId,
+          uid,
+        });
+        throw txError; // Re-throw to be caught by outer catch
+      }
+      
+      // Verify the wallet was actually updated
+      const verifyWalletRef = walletDoc(uid);
+      const verifyWalletSnap = await verifyWalletRef.get();
+      const finalBalance = verifyWalletSnap.exists ? Number(verifyWalletSnap.get('balance') || 0) : 0;
       
       logger.info('PayFast ITN: Wallet credited successfully', { 
         uid, 
         amount, 
         paymentId,
-        paymentMethod: data.payment_method 
+        paymentMethod: data.payment_method || 'UNKNOWN',
+        finalBalance,
+        walletPath: `wallets/${uid}`,
+        walletExists: verifyWalletSnap.exists,
       });
       
       res.status(200).send('OK');
     } catch (error: any) {
-      logger.error('PayFast ITN error', error);
-      // Still return 200 to prevent PayFast from retrying invalid requests
+      logger.error('PayFast ITN error', {
+        message: error?.message,
+        code: error?.code,
+        stack: error?.stack,
+        errorName: error?.name,
+        paymentId: data?.m_payment_id,
+        uid: data?.custom_str1,
+      });
+      // Return 200 to acknowledge receipt and prevent PayFast retries
+      // The error is logged for investigation
       res.status(200).send('OK');
     }
+    
   }
 );
 
