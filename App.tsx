@@ -36,6 +36,7 @@ import MyBusinessScreen from "./Screens/Businesses/MyBusinessScreen";
 import CreateGroupChatScreen from "./Screens/Community/Group/CreateGroupChatScreen";
 import EhailingScreen from "./Screens/ehailing/EhailingScreen";
 import BeADriverScreen from "./Screens/ehailing/BeADriverScreen";
+import MapScreen from "./Screens/Map/MapScreen";
 import ShopScreen from "./Screens/Businesses/ShopScreen";
 import GroupWalletScreen from "./Screens/Community/Group/GroupWalletScreen";
 import { registerForPushNotificationsAsync, savePushTokenToUser } from './hooks/useRegisterPushToken';
@@ -106,16 +107,16 @@ const TabsNavigator = () => {
           else if (route.name === "BusinessesScreen") iconName = "storefront-outline";
           else if (route.name === "WalletScreen") iconName = "wallet-outline";
           else if (route.name === "UserScreen") iconName = "person-outline";
-          else if (route.name === "EhailingScreen") iconName = "car-outline";
+          else if (route.name === "MapScreen") iconName = "map-outline";
           return <Ionicons name={iconName} size={size + 4} color={color} />;
         },
       })}
     >
       <Tab.Screen name="CommunityScreen" component={CommunityScreen} />
       <Tab.Screen name="UserScreen" component={UserScreen} />
-      <Tab.Screen name="BusinessesScreen" component={BusinessesScreen} />
       <Tab.Screen name="WalletScreen" component={WalletScreen} />
-      <Tab.Screen name="EhailingScreen" component={EhailingScreen} />
+      <Tab.Screen name="BusinessesScreen" component={BusinessesScreen} />
+      <Tab.Screen name="MapScreen" component={MapScreen} />
     </Tab.Navigator>
   );
 };

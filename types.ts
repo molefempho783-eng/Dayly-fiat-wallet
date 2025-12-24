@@ -23,7 +23,7 @@ export type RootStackParamList = {
       | "UserScreen"
       | "BusinessesScreen"
       | "WalletScreen"
-      | "EhailingScreen";
+      | "MapScreen";
   };
 
     // NEW SCREENS FOR BUSINESSES

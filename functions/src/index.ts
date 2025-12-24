@@ -759,7 +759,7 @@ export const payfastITN = onRequest(
     }
     
     // PayFast sends data as form-encoded
-    const data: Record<string, string> = {};
+      const data: Record<string, string> = {};
     let rawBodyString = '';
     
     try {
@@ -772,7 +772,7 @@ export const payfastITN = onRequest(
       } else if (Buffer.isBuffer(req.body)) {
         rawBodyString = req.body.toString();
       }
-
+      
       // Parse form-encoded data
       if (rawBodyString) {
         const parsed = new URLSearchParams(rawBodyString);
@@ -789,7 +789,7 @@ export const payfastITN = onRequest(
           .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
           .join('&');
       }
-
+      
       const merchantKey = cleanPf(process.env.PAYFAST_MERCHANT_KEY);
       const passphrase = cleanPf(process.env.PAYFAST_PASSPHRASE || '');
       
@@ -808,7 +808,7 @@ export const payfastITN = onRequest(
         amount_gross: data.amount_gross,
         custom_str1: data.custom_str1,
       });
-
+      
       // Verify signature
       const receivedSignature = data.signature;
       if (!receivedSignature) {
@@ -829,7 +829,7 @@ export const payfastITN = onRequest(
         // Fallback: reconstruct from parsed data (sorted alphabetically, excluding signature)
         const signingData: Record<string, string> = { ...data };
         delete signingData.signature;
-        
+      
         const sortedKeys = Object.keys(signingData).sort();
         signingString = sortedKeys
           .map((key) => `${key}=${encodeURIComponent(signingData[key]).replace(/%20/g, '+')}`)
@@ -844,7 +844,7 @@ export const payfastITN = onRequest(
         .createHash('md5')
         .update(finalString)
         .digest('hex');
-
+      
       if (receivedSignature !== calculatedSignature) {
         logger.error('PayFast ITN signature mismatch', {
           received: receivedSignature,
@@ -861,7 +861,7 @@ export const payfastITN = onRequest(
         pf_payment_id: data.pf_payment_id,
       });
 
-
+      
       // Verify payment status
       if (data.payment_status !== 'COMPLETE') {
         logger.info('PayFast ITN: Payment not complete', { 
@@ -943,7 +943,7 @@ export const payfastITN = onRequest(
       });
       
       try {
-        await db.runTransaction(async (t) => {
+      await db.runTransaction(async (t) => {
         const wRef = walletDoc(uid);
         const wSnap = await t.get(wRef);
         const prevBalance = wSnap.exists ? Number(wSnap.get('balance') || 0) : 0;

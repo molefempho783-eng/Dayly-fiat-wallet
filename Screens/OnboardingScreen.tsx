@@ -101,12 +101,15 @@ const OnboardingScreen = () => {
   const isLastPage = currentPage === onboardingData.length - 1;
 
   return (
+    <View style={styles.wrapper}>
     <ImageBackground
       source={require("../assets/background.png")}
       resizeMode="cover"
       style={styles.background}
     >
-      <SafeAreaView style={[styles.container, { backgroundColor: "rgba(21, 19, 22, 0.8)" }]}>
+        <View style={styles.overlay} />
+      </ImageBackground>
+      <SafeAreaView style={styles.container}>
         {/* Skip Button */}
         <TouchableOpacity style={styles.skipButton} onPress={handleSkip}>
           <Text style={[styles.skipButtonText, { color: '#ffffff' }]}>Skip</Text>
@@ -189,16 +192,26 @@ const OnboardingScreen = () => {
           </TouchableOpacity>
         </View>
       </SafeAreaView>
-    </ImageBackground>
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
-  background: {
+  wrapper: {
     flex: 1,
+  },
+  background: {
+    ...StyleSheet.absoluteFillObject,
+    width: width,
+    height: height,
+  },
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(21, 19, 22, 0.8)",
   },
   container: {
     flex: 1,
+    backgroundColor: "transparent",
   },
   skipButton: {
     position: "absolute",
